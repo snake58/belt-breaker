@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Belt Breaker — Factory Puzzle</title>
+<meta property="og:title" content="Belt Breaker — Factory Puzzle">
+<meta property="og:description" content="Rotate conveyor belts to sort dismantled machine parts by color. A satisfying factory puzzle!">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+html,body{width:100%;height:100%;overflow:hidden;background:#1a1d29;font-family:'Segoe UI',system-ui,sans-serif;color:#fff}
+#wrap{position:fixed;inset:0;display:flex;flex-direction:column}
+#topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#22263a;z-index:5}
+#topbar .lv{font-weight:800;font-size:18px}
+#topbar .score{font-weight:700;color:#ffd93b}
+#topbar button{background:#3a4066;border:none;color:#fff;border-radius:10px;padding:8px 14px;font-size:15px;font-weight:700;cursor:pointer}
+#stage{flex:1;position:relative;overflow:hidden}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+#overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(10,12,20,.78);z-index:10;flex-direction:column;gap:14px;padding:20px;text-align:center}
+#overlay h1{font-size:34px;font-weight:900;letter-spacing:1px}
+#overlay h1 .y{color:#ffd93b}
+#overlay p{color:#aab;max-width:420px;line-height:1.5;font-size:15px}
+#overlay .big{font-size:20px;color:#fff}
+#btnPlay{background:linear-gradient(180deg,#ffd93b,#f5a623);border:none;border-radius:16px;padding:16px 52px;font-size:22px;font-weight:900;color:#4a2c00;cursor:pointer;box-shadow:0 6px 0 #b97a1a;font-family:inherit}
+#btnPlay:active{transform:translateY(4px);box-shadow:0 2px 0 #b97a1a}
+.hidden{display:none!important}
+#combo{position:absolute;top:12px;left:50%;transform:translateX(-50%);font-size:26px;font-weight:900;color:#ffd93b;text-shadow:0 2px 8px #000;opacity:0;transition:opacity .2s;pointer-events:none;z-index:6}
+#toast{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.75);padding:10px 22px;border-radius:20px;font-size:15px;opacity:0;transition:opacity .25s;pointer-events:none;z-index:6;white-space:nowrap}
+</style>
+</head>
+<body>
+<div id="wrap">
+<div id="topbar">
+<button id="btnMenu">☰</button>
+<div class="lv" id="lvLabel">Level 1</div>
+<div class="score" id="scoreLabel">⭐ 0</div>
+<button id="btnRestart">↻</button>
+</div>
+<div id="stage">
+<canvas id="c"></canvas>
+<div id="combo"></div>
+<div id="toast"></div>
+<div id="overlay">
+<h1>BELT <span class="y">BREAKER</span></h1>
+<p class="big" id="ovTitle">Sort the parts!</p>
+<p id="ovText">Machines roll in and break apart. <b>Tap belts to rotate them</b> and guide each part to the container of its color. Fragile parts break on fast belts!</p>
+<button id="btnPlay">▶ PLAY</button>
+</div>
+</div>
+</div>
+<script>
+"use strict";
+/* ============================================================
+BELT BREAKER v1 — factory sorting puzzle
+Tap belts to rotate. Guide parts to matching containers.
+============================================================ */
+const canvas=document.getElementById('c'),ctx=canvas.getContext('2d');
+let W=0,H=0,DPR=1;
+const $=id=>document.getElementById(id);
+
+/* ---------- audio ---------- */
+let AC=null;
+function ac(){if(!AC){try{AC=new(window.AudioContext||window.webkitAudioContext)();}catch(e){}}if(AC&&AC.state==='suspended')AC.resume();return AC;}
+function tone(f,d,type,v,delay){const a=ac();if(!a)return;const t=a.currentTime+(delay||0);
+const o=a.createOscillator(),g=a.createGain();o.type=type||'sine';o.frequency.value=f;
+g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(v||.2,t+.015);g.gain.exponentialRampToValueAtTime(.0001,t+d);
+o.connect(g);g.connect(a.destination);o.start(t);o.stop(t+d+.05);}
+const sfx={
+ rotate(){tone(500,.07,'square',.12);tone(700,.06,'square',.1,.05);},
+ good(){tone(660,.1,'sine',.2);tone(880,.14,'sine',.2,.08);},
+ bad(){tone(220,.2,'sawtooth',.18);tone(160,.25,'sawtooth',.15,.1);},
+ break(){tone(1200,.08,'square',.15);tone(800,.1,'square',.12,.06);tone(400,.14,'square',.1,.12);},
+ spawn(){tone(300,.08,'triangle',.15);},
+ win(){[523,659,784,1047,1319].forEach((f,i)=>tone(f,.18,'triangle',.2,i*.1));},
+ click(){tone(600,.05,'square',.1);}
+};
+
+/* ---------- levels ---------- */
+/* cell: 0 empty, M machine, C container(color), B belt(dir,speed), S switch
+   dirs: 0=up 1=right 2=down 3=left ; speed: 0 normal 1 fast */
+const LEVELS=[
+{ grid:["M>^R"], pieces:"RRR", frag:"" },
+{ grid:["M>v","..B"], pieces:"BBB", frag:"" },
+{ grid:[".R","M>",".B"], pieces:"RBRB", frag:"" },
+{ grid:["M>>v","...v","...G"], pieces:"GGG", frag:"" },
+{ grid:["M>vY","..F."], pieces:"YY", frag:"Y" },
+{ grid:[".R",".^","MS",".v",".B"], pieces:"RBRB", frag:"", sDir:0 },
+{ grid:["M>>^..","...v..","...>>G"], pieces:"GGG", frag:"" },
+{ grid:["M>v..","..v..","..>>O"], pieces:"OOO", frag:"" },
+{ grid:["M>>^..","...>Y.","...F.."], pieces:"YYY", frag:"Y" },
+{ grid:[".R.",".^.","MS.",".^.",".P."], pieces:"RPRP", frag:"", sDir:0 },
+];
+
+/* ---------- game state ---------- */
+let level=0,score=0,combo=0,grid=[],belts={},pieces=[],containers={},machine=null,spawnQueue=[],spawnTimer=0,mistakes=0,playing=false,won=false;
+let cell=64,ox=0,oy=0,cols=0,rows=0;
+const DIRS=[[0,-1],[1,0],[0,1],[-1,0]];
+
+function parseLevel(idx){
+ const L=LEVELS[idx];
+ rows=L.grid.length;cols=L.grid[0].length;
+ grid=[];belts={};containers={};pieces=[];spawnQueue=[];mistakes=0;combo=0;won=false;
+ for(let y=0;y<rows;y++){grid[y]=[];
+  for(let x=0;x<cols;x++){const ch=L.grid[y][x];
+   if(ch==='M'){grid[y][x]={t:'M'};machine={x,y};}
+   else if(ch==='R'||ch==='G'||ch==='B'||ch==='Y'||ch==='O'||ch==='P'){grid[y][x]={t:'C',color:ch};containers[ch+':'+x+','+y]={x,y,color:ch};}
+   else if(ch==='>'){grid[y][x]={t:'B',dir:1,speed:0};belts[x+','+y]=grid[y][x];}
+   else if(ch==='<'){grid[y][x]={t:'B',dir:3,speed:0};belts[x+','+y]=grid[y][x];}
+   else if(ch==='^'){grid[y][x]={t:'B',dir:0,speed:0};belts[x+','+y]=grid[y][x];}
+   else if(ch==='v'){grid[y][x]={t:'B',dir:2,speed:0};belts[x+','+y]=grid[y][x];}
+   else if(ch==='F'){grid[y][x]={t:'B',dir:1,speed:1};belts[x+','+y]=grid[y][x];}
+   else if(ch==='S'){grid[y][x]={t:'S',dir:(L.sDir!==undefined?L.sDir:1),on:true};belts[x+','+y]=grid[y][x];}
+   else grid[y][x]={t:'E'};
+  }}
+
+ spawnQueue=L.pieces.split('');
+ // fragile flags by color
+ window._frag=(L.frag||'').split('');
+ layout();
+ $('lvLabel').textContent='Level '+(idx+1);
+ $('scoreLabel').textContent='⭐ '+score;
+}
+
+function layout(){
+ const pad=16;
+ cell=Math.min((W-pad*2)/cols,(H-pad*2)/rows);
+ cell=Math.min(cell,90);
+ ox=(W-cell*cols)/2;oy=(H-cell*rows)/2;
+}
+
+function resize(){DPR=Math.min(2,devicePixelRatio||1);const r=$('stage').getBoundingClientRect();
+W=r.width;H=r.height;canvas.width=W*DPR;canvas.height=H*DPR;canvas.style.width=W+'px';canvas.style.height=H+'px';
+ctx.setTransform(DPR,0,0,DPR,0,0);layout();}
+addEventListener('resize',resize);
+
+const COLORS={R:'#ef4444',G:'#22c55e',B:'#3b82f6',Y:'#eab308',O:'#f97316',P:'#a855f7'};
+const CNAMES={R:'red',G:'green',B:'blue',Y:'yellow',O:'orange',P:'purple'};
+
+/* ---------- pieces ---------- */
+function spawnPiece(){
+ if(!spawnQueue.length||!machine)return;
+ const color=spawnQueue.shift();
+ const fragile=window._frag.includes(color);
+ pieces.push({color,fragile,cx:machine.x,cy:machine.y,px:machine.x,py:machine.y,t:0,dir:1,speed:0,dead:false});
+ sfx.spawn();
+ spawnTimer=1.1;
+}
+
+function update(dt){
+ if(!playing||won)return;
+ spawnTimer-=dt;
+ if(spawnTimer<=0&&spawnQueue.length)spawnPiece();
+ const spd=2.2; // cells per second
+ for(const p of pieces){
+  if(p.dead)continue;
+  p.t+=dt*spd*(p.speed?1.8:1);
+  if(p.t>=1){
+   p.t=0;p.px=p.cx;p.py=p.cy;
+   p.cx+=DIRS[p.dir][0];p.cy+=DIRS[p.dir][1];
+   // out of bounds
+   if(p.cx<0||p.cy<0||p.cx>=cols||p.cy>=rows){killPiece(p,'lost');continue;}
+   const c=grid[p.cy][p.cx];
+   if(c.t==='B'){p.dir=c.dir;p.speed=c.speed;
+    if(p.fragile&&c.speed===1){killPiece(p,'broken');continue;}
+   }
+   else if(c.t==='S'){p.dir=c.on?c.dir:(c.dir+2)%4;p.speed=0;}
+   else if(c.t==='C'){
+    if(c.color===p.color){deliverPiece(p);}
+    else{killPiece(p,'wrong');}
+    continue;
+   }
+   else if(c.t==='M'){/* pass */}
+   else{killPiece(p,'lost');continue;}
+  }
+ }
+ pieces=pieces.filter(p=>!p.dead);
+ // win check
+ if(!spawnQueue.length&&!pieces.length&&mistakes<=2&&!won){
+  won=true;playing=false;
+  const bonus=100*(level+1)+combo*10;
+  score+=bonus;
+  $('scoreLabel').textContent='⭐ '+score;
+  sfx.win();
+  showOverlay('Level Complete!','+'+bonus+' points'+(combo>2?' · '+combo+' combo!':''),'NEXT ▶',()=>{level++;
+   if(level>=LEVELS.length){showOverlay('You did it!','You finished all 10 levels with '+score+' points!','↻ REPLAY',()=>{level=0;score=0;startLevel();});}
+   else startLevel();});
+ }
+}
+
+function deliverPiece(p){
+ p.dead=true;combo++;
+ const pts=10+combo*5;score+=pts;
+ $('scoreLabel').textContent='⭐ '+score;
+ sfx.good();
+ burst(cx(p.cx),cy(p.cy),COLORS[p.color]);
+ if(combo>=3)showCombo(combo+'x COMBO!');
+}
+function killPiece(p,why){
+ p.dead=true;combo=0;mistakes++;
+ if(why==='broken'){sfx.break();toast('💔 Fragile part broke!');}
+ else if(why==='wrong'){sfx.bad();toast('❌ Wrong container!');}
+ else{sfx.bad();toast('📦 Part lost!');}
+ if(mistakes>2&&playing){
+  playing=false;
+  showOverlay('Out of parts!','Too many mistakes. Try again!','↻ RETRY',()=>startLevel());
+ }
+}
+
+function burst(x,y,color){
+ for(let i=0;i<14;i++)particles.push({x,y,vx:(Math.random()-.5)*220,vy:(Math.random()-.5)*220-60,life:.7,color,r:3+Math.random()*3});
+}
+let particles=[];
+let comboEl=$('combo'),comboTO=null;
+function showCombo(t){comboEl.textContent=t;comboEl.style.opacity=1;clearTimeout(comboTO);comboTO=setTimeout(()=>comboEl.style.opacity=0,900);}
+let toastTO=null;
+function toast(t){const e=$('toast');e.textContent=t;e.style.opacity=1;clearTimeout(toastTO);toastTO=setTimeout(()=>e.style.opacity=0,1400);}
+function cx(gx){return ox+gx*cell+cell/2;}
+function cy(gy){return oy+gy*cell+cell/2;}
+
+/* ---------- input ---------- */
+canvas.addEventListener('pointerdown',e=>{
+ if(!playing)return;
+ const r=canvas.getBoundingClientRect();
+ const gx=Math.floor((e.clientX-r.left-ox)/cell),gy=Math.floor((e.clientY-r.top-oy)/cell);
+ if(gx<0||gy<0||gx>=cols||gy>=rows)return;
+ const c=grid[gy][gx];
+ if(c.t==='B'){c.dir=(c.dir+1)%4;sfx.rotate();}
+ else if(c.t==='S'){c.on=!c.on;sfx.rotate();}
+});
+
+/* ---------- render ---------- */
+function draw(t){
+ ctx.clearRect(0,0,W,H);
+ // bg
+ const g=ctx.createLinearGradient(0,0,0,H);
+ g.addColorStop(0,'#1a1d29');g.addColorStop(1,'#242a44');
+ ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+ if(!grid.length)return;
+ // cells
+ for(let y=0;y<rows;y++)for(let x=0;x<cols;x++){
+  const c=grid[y][x],X=ox+x*cell,Y=oy+y*cell;
+  if(c.t==='E'){ctx.fillStyle='rgba(255,255,255,.03)';ctx.fillRect(X+1,Y+1,cell-2,cell-2);continue;}
+  // base
+  ctx.fillStyle=c.t==='B'?'#2e3554':c.t==='C'?'#2a3049':c.t==='M'?'#3a2c1a':'#333a5e';
+  roundRect(X+2,Y+2,cell-4,cell-4,10);ctx.fill();
+  if(c.t==='B')drawBelt(c,X,Y,t);
+  else if(c.t==='C')drawContainer(c,X,Y);
+  else if(c.t==='M')drawMachine(c,X,Y,t);
+  else if(c.t==='S')drawSwitch(c,X,Y,t);
+ }
+ // pieces
+ for(const p of pieces){
+  const x=cx(p.px)+(cx(p.cx)-cx(p.px))*p.t;
+  const y=cy(p.py)+(cy(p.cy)-cy(p.py))*p.t;
+  drawPiece(p,x,y);
+ }
+ // particles
+ for(let i=particles.length-1;i>=0;i--){const pt=particles[i];
+  pt.x+=pt.vx/60;pt.y+=pt.vy/60;pt.vy+=400/60;pt.life-=1/60;
+  if(pt.life<=0){particles.splice(i,1);continue;}
+  ctx.globalAlpha=pt.life/.7;ctx.fillStyle=pt.color;
+  ctx.beginPath();ctx.arc(pt.x,pt.y,pt.r,0,7);ctx.fill();}
+ ctx.globalAlpha=1;
+ // queue preview
+ if(spawnQueue.length&&playing){
+  ctx.fillStyle='rgba(255,255,255,.85)';ctx.font='700 13px sans-serif';ctx.textAlign='left';
+  ctx.fillText('Next:',ox,oy-8);
+  spawnQueue.slice(0,5).forEach((col,i)=>{
+   ctx.fillStyle=COLORS[col];
+   ctx.beginPath();ctx.arc(ox+52+i*26,oy-13,10,0,7);ctx.fill();
+   if(window._frag.includes(col)){ctx.strokeStyle='#fff';ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(ox+52+i*26-6,oy-19);ctx.lineTo(ox+52+i*26+6,oy-7);ctx.stroke();}
+  });
+ }
+}
+
+function roundRect(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
+
+function drawBelt(c,X,Y,t){
+ const d=c.dir;
+ // arrows
+ ctx.save();ctx.translate(X+cell/2,Y+cell/2);ctx.rotate(d*Math.PI/2);
+ const s=cell/2;
+ // chevrons
+ ctx.fillStyle=c.speed?'#f59e0b':'#60a5fa';
+ for(let i=-1;i<=1;i++){
+  ctx.beginPath();
+  ctx.moveTo(-s*.45+i*s*.35,-s*.3);ctx.lineTo(-s*.1+i*s*.35,0);ctx.lineTo(-s*.45+i*s*.35,s*.3);
+  ctx.closePath();ctx.fill();
+ }
+ // fast stripes
+ if(c.speed){ctx.strokeStyle='rgba(245,158,11,.5)';ctx.lineWidth=3;
+  const off=(t*80)%20;
+  for(let i=-2;i<3;i++){ctx.beginPath();ctx.moveTo(-s+i*20+off,-s);ctx.lineTo(-s+i*20+off+10,s);ctx.stroke();}}
+ ctx.restore();
+}
+
+function drawContainer(c,X,Y){
+ const col=COLORS[c.color];
+ ctx.fillStyle=col+'33';roundRect(X+6,Y+6,cell-12,cell-12,8);ctx.fill();
+ ctx.strokeStyle=col;ctx.lineWidth=3;roundRect(X+6,Y+6,cell-12,cell-12,8);ctx.stroke();
+ // box icon
+ ctx.fillStyle=col;
+ const s=cell*.22;
+ ctx.fillRect(X+cell/2-s,Y+cell/2-s*.7,s*2,s*1.4);
+ ctx.fillStyle='rgba(0,0,0,.25)';
+ ctx.fillRect(X+cell/2-s,Y+cell/2-s*.7,s*2,s*.3);
+}
+
+function drawMachine(c,X,Y,t){
+ // factory machine
+ ctx.fillStyle='#4a5568';roundRect(X+6,Y+6,cell-12,cell-12,10);ctx.fill();
+ ctx.fillStyle='#f59e0b';roundRect(X+10,Y+10,cell-20,cell*.22,6);ctx.fill();
+ // gears
+ const gx=X+cell/2,gy=Y+cell*.62;
+ ctx.fillStyle='#94a3b8';
+ for(let i=0;i<8;i++){const a=i/8*6.28+t*2;
+  ctx.fillRect(gx+Math.cos(a)*cell*.16-3,gy+Math.sin(a)*cell*.16-3,6,6);}
+ ctx.fillStyle='#64748b';ctx.beginPath();ctx.arc(gx,gy,cell*.14,0,7);ctx.fill();
+ ctx.fillStyle='#f59e0b';ctx.font='bold '+cell*.28+'px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
+ ctx.fillText('⚙',gx,gy-cell*.32);
+}
+
+function drawSwitch(c,X,Y,t){
+ ctx.fillStyle=c.on?'#22c55e':'#ef4444';
+ roundRect(X+8,Y+cell*.3,cell-16,cell*.4,10);ctx.fill();
+ const kx=c.on?X+cell-22:X+22;
+ ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(kx,Y+cell/2,cell*.16,0,7);ctx.fill();
+ ctx.fillStyle='#fff';ctx.font='bold 12px sans-serif';ctx.textAlign='center';
+ ctx.fillText(c.on?'ON':'OFF',X+cell/2,Y+cell*.22);
+}
+
+function drawPiece(p,x,y){
+ const r=cell*.26;
+ ctx.fillStyle=COLORS[p.color];
+ ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill();
+ ctx.strokeStyle='rgba(255,255,255,.7)';ctx.lineWidth=2;ctx.stroke();
+ ctx.fillStyle='rgba(255,255,255,.35)';
+ ctx.beginPath();ctx.arc(x-r*.3,y-r*.3,r*.35,0,7);ctx.fill();
+ if(p.fragile){
+  // crack lines
+  ctx.strokeStyle='#fff';ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.moveTo(x-r*.5,y-r*.2);ctx.lineTo(x,y+r*.1);ctx.lineTo(x+r*.4,y-r*.4);ctx.stroke();
+ }
+}
+
+/* ---------- flow ---------- */
+function showOverlay(title,text,btn,fn){
+ $('ovTitle').textContent=title;
+ $('ovText').innerHTML=text;
+ $('btnPlay').textContent=btn;
+ $('overlay').classList.remove('hidden');
+ $('btnPlay').onclick=()=>{ac();sfx.click();$('overlay').classList.add('hidden');fn();};
+}
+function startLevel(){
+ parseLevel(level);
+ pieces=[];particles=[];
+ playing=true;won=false;spawnTimer=.5;
+ $('overlay').classList.add('hidden');
+}
+$('btnPlay').onclick=()=>{ac();sfx.click();startLevel();};
+$('btnRestart').onclick=()=>{sfx.click();startLevel();};
+$('btnMenu').onclick=()=>{sfx.click();playing=false;
+ showOverlay('BELT BREAKER','Level '+(level+1)+' · ⭐ '+score,'▶ RESUME',()=>{playing=true;});};
+
+resize();
+parseLevel(0);
+let last=performance.now();
+function loop(now){
+ const dt=Math.min(.05,(now-last)/1000);last=now;
+ update(dt);draw(now/1000);
+ requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
